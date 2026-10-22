@@ -1,0 +1,2 @@
+Model,Threshold,Precision,Recall,F1,PR-AUC,ROC-AUC,Frauds caught,Frauds missed,False alarms
+Random Forest,0.3985,0.802,0.8265,0.8141,0.8209,0.9663,81,17,20
