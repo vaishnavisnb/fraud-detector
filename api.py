@@ -13,8 +13,12 @@ import os
 
 import joblib
 import pandas as pd
-from fastapi import FastAPI, HTTPException
+from fastapi import Depends, FastAPI, HTTPException, Query
 from pydantic import BaseModel, ConfigDict
+from sqlalchemy import func
+from sqlalchemy.orm import Session
+
+from database import PredictionRecord, get_db, init_db
 
 MODEL_PATH = "models/fraud_model.pkl"
 
@@ -25,6 +29,8 @@ bundle = joblib.load(MODEL_PATH)
 model = bundle["model"]
 threshold = bundle["threshold"]
 columns = bundle["columns"]  # the exact column order the model was trained on
+
+init_db()  # creates the predictions table if it does not exist yet
 
 app = FastAPI(
     title="Credit Card Fraud Detection API",
@@ -69,6 +75,7 @@ class Transaction(BaseModel):
 
 
 class Prediction(BaseModel):
+    id: int
     fraud_probability: float
     is_fraud: bool
     threshold: float
@@ -81,15 +88,58 @@ def health():
 
 
 @app.post("/predict", response_model=Prediction)
-def predict(transaction: Transaction):
-    """Score one transaction."""
-    row = pd.DataFrame([transaction.model_dump()])[columns]
+def predict(transaction: Transaction, db: Session = Depends(get_db)):
+    """Score one transaction and save the result in the database."""
+    data = transaction.model_dump()
+    row = pd.DataFrame([data])[columns]
     try:
         probability = float(model.predict_proba(row)[0][1])
     except Exception as error:
         raise HTTPException(status_code=500, detail=f"Model could not score this transaction: {error}")
+
+    is_fraud = probability >= threshold
+    record = PredictionRecord(
+        amount=data["Amount"],
+        fraud_probability=probability,
+        is_fraud=is_fraud,
+        threshold=threshold,
+        payload=json.dumps(data),
+    )
+    db.add(record)
+    db.commit()
+    db.refresh(record)
+
     return Prediction(
+        id=record.id,
         fraud_probability=round(probability, 4),
-        is_fraud=probability >= threshold,
+        is_fraud=is_fraud,
         threshold=round(threshold, 4),
     )
+
+
+@app.get("/predictions")
+def recent_predictions(limit: int = Query(20, ge=1, le=200), db: Session = Depends(get_db)):
+    """The most recent scored transactions, newest first."""
+    rows = db.query(PredictionRecord).order_by(PredictionRecord.id.desc()).limit(limit).all()
+    return [
+        {
+            "id": r.id,
+            "created_at": r.created_at,
+            "amount": r.amount,
+            "fraud_probability": round(r.fraud_probability, 4),
+            "is_fraud": r.is_fraud,
+        }
+        for r in rows
+    ]
+
+
+@app.get("/stats")
+def stats(db: Session = Depends(get_db)):
+    """Summary of everything scored so far."""
+    total = db.query(func.count(PredictionRecord.id)).scalar() or 0
+    flagged = db.query(func.count(PredictionRecord.id)).filter(PredictionRecord.is_fraud.is_(True)).scalar() or 0
+    return {
+        "total_scored": total,
+        "flagged_as_fraud": flagged,
+        "fraud_rate": round(flagged / total, 4) if total else 0.0,
+    }
