@@ -1,27 +1,29 @@
 # 🕵️ Credit Card Fraud Detector
 
-A machine learning pipeline that detects fraudulent credit card transactions in a highly imbalanced dataset, where fraud is only about 0.17% of all transactions. The focus is on evaluating the model the right way for rare events (precision, recall, PR-AUC), not on accuracy.
+An end-to-end fraud detection project: a model trained on highly imbalanced data, served through a **FastAPI** prediction API, with every scored transaction stored in **PostgreSQL**, and the whole system packaged with **Docker Compose**.
+
+Fraud is only about 0.17% of the transactions in this dataset, so the model is judged with precision, recall and PR-AUC, not accuracy.
 
 ## Problem
 
-If a model labels every transaction "normal" it is 99.8% accurate, yet it catches zero fraud. So accuracy is the wrong yardstick here. This project builds and compares models that actually find the rare fraud cases, and measures how many frauds are caught versus how many normal transactions are wrongly flagged.
+A model that labels every transaction "normal" is 99.8% accurate and catches no fraud at all. This project trains models that actually find the rare fraud cases, measures how many frauds are caught versus how many normal transactions are wrongly flagged, and exposes the model as a service that other programs can call.
 
 ## Dataset
 
 [Credit Card Fraud Detection](https://www.kaggle.com/datasets/mlg-ulb/creditcardfraud) from Kaggle (Machine Learning Group, ULB): about 285,000 European card transactions from two days, of which 492 are fraud. Features `V1` to `V28` are anonymised (PCA-transformed), plus `Time` and `Amount`. The target column is `Class` (1 = fraud).
 
-The CSV is not included in this repo because of its size. Download it and place it at `data/creditcard.csv`.
+The CSV is not in this repo because of its size. Download it and place it at `data/creditcard.csv`.
 
-## Approach
+## Model
 
-1. **Split** the data into train, validation and test sets, keeping the same fraud ratio in each (stratified).
-2. **Handle the imbalance** with class weights, so the rare fraud class counts more during training.
+1. **Split** the data into train, validation and test sets, keeping the same fraud ratio in each.
+2. **Handle the imbalance** with class weights.
 3. **Compare three models** on the validation set: Logistic Regression, Random Forest and Histogram Gradient Boosting.
-4. **Select by PR-AUC**, the metric that suits rare events, and pick the best model.
-5. **Tune the decision threshold** on the validation set (the cut-off probability that gives the best F1), instead of using the default 0.5.
-6. **Evaluate once on the untouched test set** and report the results below.
+4. **Select by PR-AUC**, the metric that suits rare events.
+5. **Tune the decision threshold** on the validation set (best F1), instead of using 0.5.
+6. **Evaluate once on the untouched test set.**
 
-## Results (test set)
+### Results (test set)
 
 Best model: **Random Forest** (decision threshold 0.40)
 
@@ -38,24 +40,30 @@ Out of 98 frauds in the test set, the model **caught 81**, **missed 17**, and ra
 ![Precision-Recall curve](reports/pr_curve.png)
 ![Confusion matrix](reports/confusion_matrix.png)
 
-**What this means:** about 4 in 5 frauds are caught, and about 4 in 5 flagged transactions are really fraud. Lowering the threshold would catch more fraud but cause more false alarms, so in practice a bank would choose the balance based on the cost of each kind of mistake.
+## API
 
-## Tech stack
+`api.py` loads the saved model and serves it with FastAPI. Interactive documentation is at `/docs`.
 
-Python, pandas, scikit-learn, matplotlib, joblib
+| Endpoint | What it does |
+|---|---|
+| `POST /predict` | Scores one transaction and returns the fraud probability and a fraud / not-fraud decision. Invalid input (missing, extra or non-numeric fields) is rejected with a 422 error. |
+| `GET /predictions` | The most recent scored transactions, newest first. |
+| `GET /stats` | Total scored, number flagged as fraud, and the fraud rate. |
+| `GET /health` | Confirms the service is running. |
 
-## Project structure
+Every call to `/predict` is saved in a database (`database.py`, SQLAlchemy). Locally it uses a SQLite file by default. Set the `DATABASE_URL` environment variable to use PostgreSQL, which is what Docker Compose does.
 
-```
-fraud-detector/
-├── data/              # creditcard.csv (download from Kaggle, not in the repo)
-├── models/            # saved model (created by the script, not in the repo)
-├── reports/           # metrics and charts
-├── train_fraud.py     # training and evaluation pipeline
-└── README.md
-```
+## Screenshots
 
-## How to run
+> Check the file names in the `images` folder. Remove any line below whose image you do not have.
+
+![API docs](images/api.png)
+![Stored predictions](images/db.png)
+![PostgreSQL rows](images/postgres.png)
+
+## Run it with Docker (API + PostgreSQL)
+
+The trained model file is not stored in the repo, so train it first.
 
 ```bash
 git clone https://github.com/vaishnavisnb/fraud-detector.git
@@ -64,18 +72,61 @@ cd fraud-detector
 python -m venv venv
 venv\Scripts\activate          # Windows
 # source venv/bin/activate     # Mac/Linux
+python -m pip install -r requirements.txt
 
-python -m pip install pandas scikit-learn matplotlib joblib
-
-# put creditcard.csv inside the data folder, then:
+# 1. put creditcard.csv in the data folder, then train the model
 python train_fraud.py
+
+# 2. write requirements-api.txt with the exact package versions used for training
+#    (the saved model must be loaded with the same scikit-learn version)
+python make_requirements.py
+
+# 3. start the API and PostgreSQL together (Docker Desktop must be running)
+docker compose up --build -d
+```
+
+Open `http://127.0.0.1:8000/docs`, try `POST /predict`, then check the stored rows:
+
+```bash
+docker compose exec db psql -U fraud -d fraud -c "select id, amount, fraud_probability, is_fraud from predictions;"
+docker compose down            # stop (the data is kept in a Docker volume)
+```
+
+## Run it without Docker
+
+```bash
+python -m uvicorn api:app
+```
+Scored transactions are saved to a local `fraud.db` (SQLite).
+
+## Tech stack
+
+Python, pandas, scikit-learn, FastAPI, SQLAlchemy, PostgreSQL, Docker, Docker Compose
+
+## Project structure
+
+```
+fraud-detector/
+├── data/                   # creditcard.csv (download from Kaggle, not in the repo)
+├── models/                 # saved model (created by train_fraud.py, not in the repo)
+├── reports/                # metrics and charts
+├── images/                 # screenshots
+├── train_fraud.py          # training and evaluation
+├── api.py                  # FastAPI prediction service
+├── database.py             # database connection and table
+├── make_sample.py          # creates example transactions for testing the API
+├── make_requirements.py    # writes requirements-api.txt with exact versions
+├── Dockerfile              # builds the API image
+├── docker-compose.yml      # runs the API and PostgreSQL together
+└── README.md
 ```
 
 ## Limitations and next steps
 
 - The test set contains only 98 frauds, so the metrics move noticeably if a few cases change. Cross-validation would give a steadier estimate.
-- The data covers only two days of European transactions, and the features are anonymised, so it cannot be used to explain why a transaction looks fraudulent.
-- Next: serve the model through a **FastAPI** service, store scored transactions in **PostgreSQL**, and package everything with **Docker**.
+- The data covers two days of European transactions and the features are anonymised, so the model cannot explain why a transaction looks fraudulent.
+- The database password in `docker-compose.yml` is a local demo default and should be changed for any real deployment.
+- Next: automated tests for the API, a batch scoring endpoint, and monitoring how the fraud rate changes over time.
 
 ## Author
 
