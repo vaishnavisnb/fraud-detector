@@ -1,0 +1,8 @@
+venv/
+data/
+samples/
+reports/
+images/
+__pycache__/
+*.db
+.git/

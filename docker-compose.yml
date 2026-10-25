@@ -1,0 +1,29 @@
+# Starts the fraud API and a PostgreSQL database together:  docker compose up --build
+services:
+  db:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: fraud
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-fraudpass}   # local demo default; override with an environment variable
+      POSTGRES_DB: fraud
+    volumes:
+      - pgdata:/var/lib/postgresql/data                     # keeps the data when the containers stop
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U fraud -d fraud"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  api:
+    build: .
+    init: true                                              # small init process so the container stops cleanly
+    ports:
+      - "8000:8000"
+    environment:
+      DATABASE_URL: postgresql://fraud:${POSTGRES_PASSWORD:-fraudpass}@db:5432/fraud
+    depends_on:
+      db:
+        condition: service_healthy                          # wait until the database is ready
+
+volumes:
+  pgdata:
